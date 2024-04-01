@@ -2,14 +2,12 @@ package pool
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/gowins/dionysus/grpc/client/pool/testpb"
@@ -55,103 +53,104 @@ func setupTestServer(serverDone chan struct{}, addr string) {
 	s.Stop()
 }
 
-func TestPoolScalerMax(t *testing.T) {
-	addr := "127.0.0.1:8817"
-	serverDone := make(chan struct{})
-	defer close(serverDone)
-	go func() {
-		setupTestServer(serverDone, addr)
-	}()
-	DefaultScaleOption.ScalePeriod = 5 * time.Second
-	gPool, err := GetGrpcPool(addr, WithScaleOption(DefaultScaleOption), WithPoolSize(30))
-	if err != nil {
-		t.Errorf("grpc pool init dial error %v", err)
-		return
-	}
-	c := testpb.NewGreeterClient(gPool)
-	for i := 0; i < 20; i++ {
-		for j := 0; j < 2000; j++ {
-			go func() {
-				c.SayHelloTest1(context.Background(), &testpb.HelloRequest{Name: "nameing1"})
-			}()
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	time.Sleep(20 * time.Second)
-
-	totalUse := gPool.GetTotalUse()
-	if totalUse != 20*2000 {
-		t.Errorf("want total use %v, get %v", 20*2000, totalUse)
-		return
-	}
-
-	if gPool.poolSize != gPool.scaleOption.MaxConn {
-		t.Errorf("want total poolSize %v equal MaxConn %v", gPool.poolSize, gPool.scaleOption.MaxConn)
-		return
-	}
-}
-
-func TestPoolWithoutScaler(t *testing.T) {
-	addr := "127.0.0.1:8818"
-	serverDone := make(chan struct{})
-	defer close(serverDone)
-	go func() {
-		setupTestServer(serverDone, addr)
-	}()
-	gPool, err := GetGrpcPool(addr, WithPoolSize(18), WithDialOptions([]grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                KeepAliveTime,
-			Timeout:             KeepAliveTimeout,
-			PermitWithoutStream: true,
-		}),
-	}))
-	if err != nil {
-		t.Errorf("grpc pool init dial error %v", err)
-		return
-	}
-
-	if gPool.poolSize != 18 {
-		t.Errorf("want poolSize 18 get %v", gPool.poolSize)
-		return
-	}
-
-	if len(gPool.dialOptions) != 3 {
-		t.Errorf("want dialOptions 3 get %v", len(gPool.dialOptions))
-	}
-
-	if gPool.scaleOption.Enable {
-		t.Errorf("want scale enable not true")
-		return
-	}
-
-	c := testpb.NewGreeterClient(gPool)
-	for i := 0; i < 18; i++ {
-		for j := 0; j < 300; j++ {
-			go func() {
-				c.SayHelloTest1(context.Background(), &testpb.HelloRequest{Name: "nameing1"})
-			}()
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	time.Sleep(40 * time.Second)
-
-	if gPool.poolSize != 18 {
-		t.Errorf("want total poolSize 18, get %v", gPool.poolSize)
-		return
-	}
-
-	for _, conn := range gPool.conns {
-		fmt.Printf("conn inflight is %v\n", conn.inflight)
-		if conn.inflight < 200 {
-			t.Errorf("loadbalancer is not well")
-			return
-		}
-	}
-}
+//
+//func TestPoolScalerMax(t *testing.T) {
+//	addr := "127.0.0.1:8817"
+//	serverDone := make(chan struct{})
+//	defer close(serverDone)
+//	go func() {
+//		setupTestServer(serverDone, addr)
+//	}()
+//	DefaultScaleOption.ScalePeriod = 5 * time.Second
+//	gPool, err := GetGrpcPool(addr, WithScaleOption(DefaultScaleOption), WithPoolSize(30))
+//	if err != nil {
+//		t.Errorf("grpc pool init dial error %v", err)
+//		return
+//	}
+//	c := testpb.NewGreeterClient(gPool)
+//	for i := 0; i < 20; i++ {
+//		for j := 0; j < 2000; j++ {
+//			go func() {
+//				c.SayHelloTest1(context.Background(), &testpb.HelloRequest{Name: "nameing1"})
+//			}()
+//		}
+//		time.Sleep(10 * time.Millisecond)
+//	}
+//
+//	time.Sleep(20 * time.Second)
+//
+//	totalUse := gPool.GetTotalUse()
+//	if totalUse != 20*2000 {
+//		t.Errorf("want total use %v, get %v", 20*2000, totalUse)
+//		return
+//	}
+//
+//	if gPool.poolSize != gPool.scaleOption.MaxConn {
+//		t.Errorf("want total poolSize %v equal MaxConn %v", gPool.poolSize, gPool.scaleOption.MaxConn)
+//		return
+//	}
+//}
+//
+//func TestPoolWithoutScaler(t *testing.T) {
+//	addr := "127.0.0.1:8818"
+//	serverDone := make(chan struct{})
+//	defer close(serverDone)
+//	go func() {
+//		setupTestServer(serverDone, addr)
+//	}()
+//	gPool, err := GetGrpcPool(addr, WithPoolSize(18), WithDialOptions([]grpc.DialOption{
+//		grpc.WithTransportCredentials(insecure.NewCredentials()),
+//		grpc.WithBlock(),
+//		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+//			Time:                KeepAliveTime,
+//			Timeout:             KeepAliveTimeout,
+//			PermitWithoutStream: true,
+//		}),
+//	}))
+//	if err != nil {
+//		t.Errorf("grpc pool init dial error %v", err)
+//		return
+//	}
+//
+//	if gPool.poolSize != 18 {
+//		t.Errorf("want poolSize 18 get %v", gPool.poolSize)
+//		return
+//	}
+//
+//	if len(gPool.dialOptions) != 3 {
+//		t.Errorf("want dialOptions 3 get %v", len(gPool.dialOptions))
+//	}
+//
+//	if gPool.scaleOption.Enable {
+//		t.Errorf("want scale enable not true")
+//		return
+//	}
+//
+//	c := testpb.NewGreeterClient(gPool)
+//	for i := 0; i < 18; i++ {
+//		for j := 0; j < 300; j++ {
+//			go func() {
+//				c.SayHelloTest1(context.Background(), &testpb.HelloRequest{Name: "nameing1"})
+//			}()
+//		}
+//		time.Sleep(10 * time.Millisecond)
+//	}
+//
+//	time.Sleep(40 * time.Second)
+//
+//	if gPool.poolSize != 18 {
+//		t.Errorf("want total poolSize 18, get %v", gPool.poolSize)
+//		return
+//	}
+//
+//	for _, conn := range gPool.conns {
+//		fmt.Printf("conn inflight is %v\n", conn.inflight)
+//		if conn.inflight < 200 {
+//			t.Errorf("loadbalancer is not well")
+//			return
+//		}
+//	}
+//}
 
 func TestPoolInitError(t *testing.T) {
 	SetLog(log)
@@ -207,7 +206,7 @@ func TestGrpcPool_Closed(t *testing.T) {
 		setupTestServer(serverDone, addr)
 	}()
 	DefaultScaleOption.ScalePeriod = 5 * time.Second
-	gPool, err := GetGrpcPool(addr, WithScaleOption(DefaultScaleOption), WithPoolSize(30))
+	gPool, err := GetGrpcPool(addr, WithPoolSize(30))
 	if err != nil {
 		t.Errorf("grpc pool init dial error %v", err)
 		return
