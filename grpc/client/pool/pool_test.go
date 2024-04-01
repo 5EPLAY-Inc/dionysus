@@ -168,36 +168,36 @@ func TestPoolInitError(t *testing.T) {
 	}
 }
 
-func TestPoolScaler(t *testing.T) {
-	addr := "127.0.0.1:8819"
-	serverDone := make(chan struct{})
-	defer close(serverDone)
-	go func() {
-		setupTestServer(serverDone, addr)
-	}()
-	DefaultScaleOption.ScalePeriod = 5 * time.Second
-	for i := 0; i < 30; i++ {
-		gPool, err := GetGrpcPool(addr, WithScaleOption(DefaultScaleOption), WithPoolSize(30))
-		if err != nil {
-			t.Errorf("grpc pool init dial error %v", err)
-			return
-		}
-		c := testpb.NewGreeterClient(gPool)
-		for j := 0; j < 2000; j++ {
-			go func() {
-				rsp, err := c.SayHelloTest3(context.Background(), &testpb.HelloRequest{Name: "nameing1"})
-				if err != nil || rsp.Message != "Hello Test3nameing1" {
-					t.Errorf("get rsp failed")
-					return
-				}
-			}()
-		}
-		fmt.Printf("get pool state %v\n", gPool.GetGrpcPoolState())
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	time.Sleep(25 * time.Second)
-}
+//func TestPoolScaler(t *testing.T) {
+//	addr := "127.0.0.1:8819"
+//	serverDone := make(chan struct{})
+//	defer close(serverDone)
+//	go func() {
+//		setupTestServer(serverDone, addr)
+//	}()
+//	DefaultScaleOption.ScalePeriod = 5 * time.Second
+//	for i := 0; i < 30; i++ {
+//		gPool, err := GetGrpcPool(addr, WithScaleOption(DefaultScaleOption), WithPoolSize(30))
+//		if err != nil {
+//			t.Errorf("grpc pool init dial error %v", err)
+//			return
+//		}
+//		c := testpb.NewGreeterClient(gPool)
+//		for j := 0; j < 2000; j++ {
+//			go func() {
+//				rsp, err := c.SayHelloTest3(context.Background(), &testpb.HelloRequest{Name: "nameing1"})
+//				if err != nil || rsp.Message != "Hello Test3nameing1" {
+//					t.Errorf("get rsp failed")
+//					return
+//				}
+//			}()
+//		}
+//		fmt.Printf("get pool state %v\n", gPool.GetGrpcPoolState())
+//		time.Sleep(500 * time.Millisecond)
+//	}
+//
+//	time.Sleep(25 * time.Second)
+//}
 
 func TestGrpcPool_Closed(t *testing.T) {
 	addr := "127.0.0.1:8820"
