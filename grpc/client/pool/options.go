@@ -1,7 +1,6 @@
 package pool
 
 import (
-	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -9,15 +8,26 @@ import (
 	"google.golang.org/grpc/keepalive"
 )
 
-type Option func(*GrpcPool)
+type Options func(gp *GrpcPool)
 
-func WithPoolSize(poolSize int) Option {
+func WithMaxIdle(maxIdle int64) Options {
 	return func(pool *GrpcPool) {
-		pool.poolSize = poolSize
+		pool.maxIdle = maxIdle
 	}
 }
 
-func WithDialOptions(dialOptions []grpc.DialOption) Option {
+func WithMaxActive(maxActive int64) Options {
+	return func(pool *GrpcPool) {
+		pool.maxActive = maxActive
+	}
+}
+func WithMaxConcurrentStreams(maxConcurrentStreams int64) Options {
+	return func(pool *GrpcPool) {
+		pool.maxConcurrentStreams = maxConcurrentStreams
+	}
+}
+
+func WithDialOptions(dialOptions []grpc.DialOption) Options {
 	return func(pool *GrpcPool) {
 		pool.dialOptions = dialOptions
 	}
@@ -46,16 +56,15 @@ const (
 	// MaxRecvMsgSize set max gRPC receive message poolSize received from server.
 	// If any message poolSize is larger than current value, an error will be reported from gRPC.
 	MaxRecvMsgSize = 1 << 30
+
+	DefaultDialTimeout = 1 * time.Second
+
+	DefaultMaxIdle = 6
+
+	DefaultMaxActive = 10
+
+	DefaultMaxConcurrent = 16
 )
-
-var DefaultScaleOption = &ScaleOption{
-	Enable:          true,
-	ScalePeriod:     time.Second * 30,
-	MaxConn:         300,
-	DesireMaxStream: 80,
-}
-
-var DefaultDialTimeout = 1 * time.Second
 
 var DefaultDialOpts = []grpc.DialOption{
 	grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -70,8 +79,3 @@ var DefaultDialOpts = []grpc.DialOption{
 		PermitWithoutStream: true,
 	}),
 }
-
-var defaultPoolSize = 3
-
-var grpcPool sync.Map
-var poolInit sync.Mutex

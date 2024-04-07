@@ -145,6 +145,7 @@ func (gp *GrpcPool) pickLeastConn() (*Conn, error) {
 	}
 	return conn, nil
 }
+
 func (gp *GrpcPool) GetTotalUse() uint32 {
 	var (
 		totalUse uint32

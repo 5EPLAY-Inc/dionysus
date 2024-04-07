@@ -154,13 +154,13 @@ func setupTestServer(serverDone chan struct{}, addr string) {
 
 func TestPoolInitError(t *testing.T) {
 	SetLog(log)
-	_, err := GetGrpcPool("")
+	_, err := New("")
 	if err == nil {
 		t.Errorf("want error is not nil, get nil")
 		return
 	}
 
-	_, err = GetGrpcPool("127.0.0.1:8888")
+	_, err = New("127.0.0.1:8888")
 	if err == nil {
 		t.Errorf("want error is not nil, get nil")
 		return
@@ -205,8 +205,7 @@ func TestGrpcPool_Closed(t *testing.T) {
 	go func() {
 		setupTestServer(serverDone, addr)
 	}()
-	DefaultScaleOption.ScalePeriod = 5 * time.Second
-	gPool, err := GetGrpcPool(addr, WithPoolSize(30))
+	gPool, err := New(addr, WithMaxActive(30))
 	if err != nil {
 		t.Errorf("grpc pool init dial error %v", err)
 		return
@@ -224,9 +223,9 @@ func TestGrpcPool_Closed(t *testing.T) {
 		t.Errorf("grpc pool is closed, want isClosed is true")
 		return
 	}
-	for i := 0; i < gPool.poolSize; i++ {
-		if gPool.conns[i].conn.GetState() != connectivity.Shutdown {
-			t.Errorf("grpc pool is closed, want conn state is Shutdown, get %v", gPool.conns[i].conn.GetState())
+	for i := 0; i < int(gPool.maxActive); i++ {
+		if s := (<-gPool.conns).conn.GetState(); s != connectivity.Shutdown {
+			t.Errorf("grpc pool is closed, want conn state is Shutdown, get %v", s)
 			return
 		}
 	}

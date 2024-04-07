@@ -3,101 +3,113 @@ package pool
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 )
 
+var (
+	// ErrClosed is the error when the client pool is closed
+	ErrClosed = errors.New("grpc pool: client pool is closed")
+	// ErrTimeout is the error when the client pool timed out
+	ErrTimeout = errors.New("grpc pool: client pool timed out")
+	// ErrAlreadyClosed is the error when the client conn was already closed
+	ErrAlreadyClosed = errors.New("grpc pool: the connection was already closed")
+	// ErrFullPool is the error when the pool is already full
+	ErrFullPool = errors.New("grpc pool: closing a ClientConn into a full pool")
+)
+
 type GrpcPool struct {
-	conns       []*GrpcConn
-	poolSize    int
-	dialOptions []grpc.DialOption
-	target      string
-	sync.Locker
-	stateUpdate sync.Locker
-	isClosed    bool
+	target               string
+	maxIdle              int64
+	maxActive            int64
+	maxConcurrentStreams int64
+	dialOptions          []grpc.DialOption
+	conns                chan *GrpcConn
+	factory              func(string, ...grpc.DialOption) (*grpc.ClientConn, error)
+	Locker               sync.RWMutex
+	isClosed             bool
 }
 
 type GrpcConn struct {
 	conn     *grpc.ClientConn
+	gp       *GrpcPool
 	inflight int64
 }
 
-type GrpcPoolState struct {
-	ConnStates  []GrpcConnState
-	ReserveSize int
-	Target      string
-	ScaleOption ScaleOption
-	IsClosed    bool
+// Close todo with locker
+func (gc *GrpcConn) Close() error {
+	if gc == nil {
+		return nil
+	}
+
+	gc.gp.Locker.Lock()
+	defer gc.gp.Locker.Unlock()
+
+	if gc.conn == nil {
+		return ErrAlreadyClosed
+	}
+	if gc.gp.IsClosed() {
+		return ErrClosed
+	}
+
+	select {
+	case gc.gp.conns <- gc:
+		return nil
+	default:
+
+		return ErrFullPool
+	}
 }
 
-type GrpcConnState struct {
-	connState string
-	inflight  int64
-}
-
-type ScaleOption struct {
-	Enable          bool
-	ScalePeriod     time.Duration
-	MaxConn         int
-	DesireMaxStream int
-}
-
-func InitGrpcPool(target string, opts ...Option) (*GrpcPool, error) {
+func New(target string, opts ...Options) (*GrpcPool, error) {
 	if target == "" {
 		return nil, fmt.Errorf("grpc pool target should not be nil")
 	}
 	gp := &GrpcPool{
-		poolSize:    defaultPoolSize,
-		dialOptions: DefaultDialOpts,
-		target:      target,
-		Locker:      new(sync.Mutex),
-		stateUpdate: new(sync.Mutex),
+		target:               target,
+		maxIdle:              DefaultMaxIdle,
+		maxActive:            DefaultMaxActive,
+		maxConcurrentStreams: DefaultMaxConcurrent,
+		dialOptions:          DefaultDialOpts,
+		factory:              grpcDialWithTimeout,
 	}
 
 	for _, opt := range opts {
 		opt(gp)
 	}
+	if gp.maxIdle > gp.maxActive {
+		return nil, fmt.Errorf("grpc pool gp.maxIdle > gp.maxActive")
+	}
+	if gp.maxIdle == 0 || gp.maxActive == 0 || gp.maxConcurrentStreams == 0 {
+		return nil, fmt.Errorf("grpc pool gp.maxIdle == 0 || gp.maxActive == 0  || gp.maxConcurrentStreams == 0")
+	}
 
-	gp.conns = make([]*GrpcConn, gp.poolSize)
+	gp.conns = make(chan *GrpcConn, gp.maxActive)
 
-	for i := 0; i < gp.poolSize; i++ {
-		conn, err := grpcDialWithTimeout(gp.target, gp.dialOptions...)
+	for i := 0; i < int(gp.maxIdle); i++ {
+		conn, err := gp.factory(target, gp.dialOptions...)
 		if err != nil {
 			return gp, fmt.Errorf("grpc dial target %v error %v", gp.target, err)
 		}
-		gp.conns[i] = &GrpcConn{
+		gp.conns <- &GrpcConn{
 			conn:     conn,
+			gp:       gp,
 			inflight: 0,
 		}
 	}
 
-	return gp, nil
-}
-
-func GetGrpcPool(target string, opts ...Option) (*GrpcPool, error) {
-	if val, ok := grpcPool.Load(target); ok {
-		return val.(*GrpcPool), nil
+	for i := 0; i < int(gp.maxActive-gp.maxIdle); i++ {
+		gp.conns <- &GrpcConn{
+			gp:       gp,
+			inflight: 0,
+		}
 	}
 
-	poolInit.Lock()
-	defer poolInit.Unlock()
-
-	// 双检, 避免多次创建
-	if val, ok := grpcPool.Load(target); ok {
-		return val.(*GrpcPool), nil
-	}
-
-	gp, err := InitGrpcPool(target, opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	grpcPool.Store(target, gp)
 	return gp, nil
 }
 
@@ -113,83 +125,76 @@ func grpcDialWithTimeout(target string, opts ...grpc.DialOption) (*grpc.ClientCo
 }
 
 func (gp *GrpcPool) Invoke(ctx context.Context, method string, args interface{}, reply interface{}, opts ...grpc.CallOption) error {
-	grpcConn := gp.pickLeastConn()
+	grpcConn, err := gp.pickLeastConn()
+	if err != nil {
+		return err
+	}
 	atomic.AddInt64(&grpcConn.inflight, 1)
-	defer atomic.AddInt64(&grpcConn.inflight, -1)
+	defer func() {
+		atomic.AddInt64(&grpcConn.inflight, -1)
+		_ = grpcConn.Close()
+	}()
 	return grpcConn.conn.Invoke(ctx, method, args, reply, opts...)
 }
 
 func (gp *GrpcPool) NewStream(ctx context.Context, desc *grpc.StreamDesc, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
-	grpcConn := gp.pickLeastConn()
+	grpcConn, err := gp.pickLeastConn()
+	if err != nil {
+		return nil, err
+	}
+
 	atomic.AddInt64(&grpcConn.inflight, 1)
-	defer atomic.AddInt64(&grpcConn.inflight, -1)
+	defer func() {
+		atomic.AddInt64(&grpcConn.inflight, -1)
+		grpcConn.Close()
+	}()
 	return grpcConn.conn.NewStream(ctx, desc, method, opts...)
 }
 
-func (gp *GrpcPool) pickLeastConn() *GrpcConn {
-	gp.Lock()
-	randIndex1 := rand.Uint32()
-	randIndex2 := rand.Uint32()
-	randIndex3 := rand.Uint32()
-	gp.Unlock()
-	minIndex := randIndex1
-	minInflight := gp.conns[int(minIndex)%gp.poolSize].inflight
-
-	if minInflight > gp.conns[int(randIndex2)%gp.poolSize].inflight {
-		minInflight = gp.conns[int(randIndex2)%gp.poolSize].inflight
-		minIndex = randIndex2
-	}
-
-	if minInflight > gp.conns[int(randIndex3)%gp.poolSize].inflight {
-		minInflight = gp.conns[int(randIndex3)%gp.poolSize].inflight
-		minIndex = randIndex3
-	}
-	grpcConn := gp.conns[int(minIndex)%gp.poolSize]
-
-	// if conn is not ready, choose a next ready conn
-	if grpcConn.conn.GetState() != connectivity.Ready && grpcConn.conn.GetState() != connectivity.Idle {
-		for i := 0; i < gp.poolSize; i++ {
-			if gp.conns[(int(minIndex)+i)%gp.poolSize].conn.GetState() == connectivity.Ready ||
-				gp.conns[(int(minIndex)+i)%gp.poolSize].conn.GetState() == connectivity.Idle {
-				return gp.conns[(int(minIndex)+i)%gp.poolSize]
+func (gp *GrpcPool) pickLeastConn() (*GrpcConn, error) {
+	var err error
+	for {
+		select {
+		case c, ok := <-gp.conns:
+			if !ok || c == nil {
+				// 处理通道被关闭的情况，或者接收到零值的情况
+				return nil, errors.New("无法从连接池中获取连接")
 			}
-		}
-	}
-	return grpcConn
-}
+			if c.conn == nil || c.conn.GetState() != connectivity.Idle ||
+				c.conn.GetState() != connectivity.Ready {
+				c.conn, err = gp.factory(gp.target, gp.dialOptions...)
+				if err != nil {
+					c.conn = nil
+					_ = c.Close()
+					return nil, err
+				}
+			}
 
-func (gp *GrpcPool) GetTotalUse() int {
-	var totalUse int
-	for i := 0; i < gp.poolSize; i++ {
-		totalUse = totalUse + int(gp.conns[i].inflight)
-	}
-	return totalUse
-}
-
-func (gp *GrpcPool) GetGrpcPoolState() *GrpcPoolState {
-	connStates := make([]GrpcConnState, gp.poolSize)
-	for i := 0; i < gp.poolSize; i++ {
-		connStates[i] = GrpcConnState{
-			connState: gp.conns[i].conn.GetState().String(),
-			inflight:  gp.conns[i].inflight,
+			if atomic.CompareAndSwapInt64(&c.inflight, gp.maxConcurrentStreams, c.inflight) {
+				return nil, fmt.Errorf("conn's flight already equal maxConcurrentStreams %d", gp.maxConcurrentStreams)
+			}
+			return c, nil
+		case <-time.After(100 * time.Microsecond):
+			return nil, errors.New("without useful conn")
 		}
 	}
 
-	return &GrpcPoolState{
-		ConnStates:  connStates,
-		ReserveSize: gp.poolSize,
-		Target:      gp.target,
-		IsClosed:    gp.isClosed,
-	}
 }
 
 func (gp *GrpcPool) Closed() {
+	//todo locker with get conns
+	gp.Locker.Lock()
+	defer gp.Locker.Unlock()
 	gp.isClosed = true
-	gp.stateUpdate.Lock()
-	defer gp.stateUpdate.Unlock()
-	for i := 0; i < gp.poolSize; i++ {
-		if err := gp.conns[i].conn.Close(); err != nil {
-			log.Errorf("grpc conn close error %v", err)
-		}
+	close(gp.conns)
+	for i := 0; i < int(gp.maxActive); i++ {
+		c := <-gp.conns
+		_ = c.conn.Close()
 	}
+}
+
+func (gp *GrpcPool) IsClosed() bool {
+	gp.Locker.Lock()
+	defer gp.Locker.Unlock()
+	return gp.isClosed || gp == nil
 }
