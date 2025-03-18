@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"fmt"
+	logger "github.com/gowins/dionysus/log"
 	"sync"
 
 	"github.com/gowins/dionysus/grpc/registry"
@@ -63,7 +64,7 @@ func (d *discovBuilder) getAddrs(endpoint string) []resolver.Address {
 	return reshuffle(addrs)
 }
 
-// discovBuilder discov://wpt.etcd/service_name
+// Build discovBuilder discov://wpt.etcd/service_name
 func (d *discovBuilder) Build(target resolver.Target, cc resolver.ClientConn, opts resolver.BuildOptions) (resolver.Resolver, error) {
 	// target.Authority得到注册中心的地址
 	// 当然也可以直接通过全局变量[registry.Default]获取注册中心, 然后进行判断
@@ -83,6 +84,7 @@ func (d *discovBuilder) Build(target resolver.Target, cc resolver.ClientConn, op
 	d.updateService(services...)
 
 	var addrs = d.getAddrs(target.Endpoint())
+	logger.WithField("services", services).WithField("target", target.Endpoint()).WithField("addrs", addrs).WithField("eeeeeeeeeeee", err).Info("GetService success")
 
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("service none available")
@@ -99,7 +101,7 @@ func (d *discovBuilder) Build(target resolver.Target, cc resolver.ClientConn, op
 		defer w.Stop()
 		for {
 			res, err := w.Next()
-			if err == registry.ErrWatcherStopped {
+			if errors.Is(err, registry.ErrWatcherStopped) {
 				break
 			}
 

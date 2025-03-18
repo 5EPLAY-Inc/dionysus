@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/gowins/dionysus/recovery"
+	"github.com/pkg/errors"
 )
 
 var registries sync.Map
@@ -27,7 +27,7 @@ func Register(name string, r Registry) error {
 	return nil
 }
 
-func Init(rawUrl string) (gErr error) {
+func Init(rawUrl string, opts ...Option) (gErr error) {
 	defer recovery.CheckErr(&gErr)
 
 	url1, err := url.Parse(rawUrl)
@@ -41,7 +41,6 @@ func Init(rawUrl string) (gErr error) {
 	}
 
 	params := url1.Query()
-	var opts []Option
 	if val := params.Get("secure"); val != "" {
 		b, err := strconv.ParseBool(val)
 		if err != nil {
