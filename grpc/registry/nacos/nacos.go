@@ -11,14 +11,12 @@ import (
 	"github.com/pkg/errors"
 	"github.com/spf13/cast"
 	"net"
-	"path"
 	"strings"
 	"time"
 )
 
 const (
 	Name           = "nacos"
-	Prefix         = "/microservices"
 	DefaultTimeout = time.Second * 5
 	DefaultGroup   = "public"
 )
@@ -108,7 +106,7 @@ func (r *registryImpl) Init(opts ...registry.Option) error {
 }
 
 func (r *registryImpl) serviceNameComplex(serviceName string) string {
-	return path.Join(Prefix, strings.Replace(serviceName, "/", "-", -1))
+	return strings.Replace(serviceName, "/", "-", -1)
 }
 
 func (r *registryImpl) Register(service *registry.Service, opts ...registry.RegisterOption) error {
