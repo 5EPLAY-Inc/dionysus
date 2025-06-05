@@ -18,7 +18,7 @@ import (
 const (
 	Name           = "nacos"
 	DefaultTimeout = time.Second * 5
-	DefaultGroup   = "public"
+	DefaultGroup   = "DEFAULT_GROUP"
 )
 
 type (
