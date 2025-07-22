@@ -110,7 +110,6 @@ func (r *registryImpl) serviceNameComplex(serviceName string) string {
 }
 
 func (r *registryImpl) Register(service *registry.Service, opts ...registry.RegisterOption) error {
-	fmt.Printf("%s\n", 22222222222)
 	if len(service.Nodes) == 0 {
 		return errors.New("Require at least one node")
 	}
@@ -123,7 +122,7 @@ func (r *registryImpl) Register(service *registry.Service, opts ...registry.Regi
 	}
 
 	var (
-		groupName string = DefaultGroup
+		groupName = DefaultGroup
 	)
 
 	if name, ok := options.Context.Value(NamingClientGroupNameKey{}).(string); ok {
@@ -180,7 +179,9 @@ func (r *registryImpl) GetService(serviceName string) ([]*registry.Service, erro
 		GroupName:   DefaultGroup,
 	})
 
-	logger.WithField("services", instances).WithField("serviceName", serviceName).WithField("eeeeeeeeeeee", err).Info("GetService success")
+	logger.WithField("services", instances).
+		WithField("serviceName", serviceName).
+		Info("GetService success")
 
 	if err != nil {
 		return nil, err
