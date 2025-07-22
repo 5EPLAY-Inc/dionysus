@@ -110,7 +110,7 @@ func main() {
 		{
 			StepName: "deregister service from registry",
 			Func: func() error {
-				err := registry.Init("nacos://172.16.8.129:8848?secure=false&timeout=30s", nacos.WithClientConfig(&constant.ClientConfig{
+				err := registry.Init("nacos://127.0.0.1:8848?secure=false&timeout=30s", nacos.WithClientConfig(&constant.ClientConfig{
 					NamespaceId:         "public", // 如果需要支持多namespace，我们可以创建多个client,它们有不同的NamespaceId。当namespace是public时，此处填空字符串。
 					TimeoutMs:           5000,
 					NotLoadCacheAtStart: true,

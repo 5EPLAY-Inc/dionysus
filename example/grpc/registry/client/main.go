@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/gowins/dionysus/grpc/balancer/resolver"
+	_ "github.com/gowins/dionysus/grpc/balancer/resolver"
 	"github.com/gowins/dionysus/grpc/registry"
 	"github.com/gowins/dionysus/grpc/registry/nacos"
 	"github.com/nacos-group/nacos-sdk-go/v2/common/constant"
@@ -57,7 +57,10 @@ func main() {
 		panic(err)
 	}
 
-	target := resolver.DiscovScheme + "://nacos" + "/helloworld-rpc"
+	target := "discov://nacos" + "/helloworld-rpc"
+	//discov://nacos/helloworld-rpc
+	//discov://nacos/helloworld-rpc
+	//
 	gPool, err := pool.GetGrpcPool(target)
 	if err != nil {
 		fmt.Printf("grpc pool init dial error %v\n", err)

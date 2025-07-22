@@ -82,9 +82,12 @@ func (d *discovBuilder) Build(target resolver.Target, cc resolver.ClientConn, op
 
 	// 启动后，更新服务地址
 	d.updateService(services...)
-
 	var addrs = d.getAddrs(target.Endpoint())
-	logger.WithField("services", services).WithField("target", target.Endpoint()).WithField("addrs", addrs).WithField("eeeeeeeeeeee", err).Info("GetService success")
+	logger.
+		WithField("services", services).
+		WithField("target", target.Endpoint()).
+		WithField("addrs", addrs).
+		Info("【Build】Initialize Resource successfully！")
 
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("service none available")
