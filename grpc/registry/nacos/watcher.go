@@ -55,15 +55,17 @@ func newWatcher(nr *registryImpl, opts ...registry.WatchOption) (registry.Watche
 		Doms:          make([]string, 0),
 	}
 	withContext := false
-	if wo.Context != nil {
-		if p, ok := wo.Context.Value("").(vo.SubscribeParam); ok {
-			nw.param = &p
-			withContext = ok
-			nw.param.SubscribeCallback = nw.callBackHandle
-			go nr.client.Subscribe(nw.param)
+	if wo.Context != nil && wo.Service != "" {
+		logger.WithField("serviceName", wo).Info("watch specify service")
+		nw.param = &vo.SubscribeParam{
+			ServiceName: wo.Service,
 		}
+		withContext = true
+		nw.param.SubscribeCallback = nw.callBackHandle
+		go nr.client.Subscribe(nw.param)
 	}
 	if !withContext {
+		logger.WithField("serviceName", wo).Info("watch all service")
 		param := vo.GetAllServiceInfoParam{}
 		services, err := nr.client.GetAllServicesInfo(param)
 		if err != nil {
