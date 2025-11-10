@@ -3,14 +3,14 @@ package nacos
 import (
 	"context"
 	"fmt"
+	"net"
+	"reflect"
+	"sync"
+
 	"github.com/gowins/dionysus/grpc/registry"
 	logger "github.com/gowins/dionysus/log"
 	"github.com/nacos-group/nacos-sdk-go/v2/model"
 	"github.com/nacos-group/nacos-sdk-go/v2/vo"
-	"log"
-	"net"
-	"reflect"
-	"sync"
 )
 
 const (
@@ -109,7 +109,7 @@ func (nw *watcher) callBackHandle(services []model.Instance, err error) {
 		nw.cacheServices[serviceName] = services
 		nw.Unlock()
 		for _, v := range services {
-			nw.next <- &registry.Result{Action: "create", Service: buildRegistryService(&v)}
+			nw.next <- &registry.Result{Action: "create", Service: nw.buildRegistryService(&v)}
 			return
 		}
 	} else {
@@ -119,7 +119,7 @@ func (nw *watcher) callBackHandle(services []model.Instance, err error) {
 				if subscribeService.InstanceId == cacheService.InstanceId {
 					if !reflect.DeepEqual(subscribeService, cacheService) {
 						//update instance
-						nw.next <- &registry.Result{Action: "update", Service: buildRegistryService(&subscribeService)}
+						nw.next <- &registry.Result{Action: "update", Service: nw.buildRegistryService(&subscribeService)}
 						return
 					}
 					create = false
@@ -127,13 +127,7 @@ func (nw *watcher) callBackHandle(services []model.Instance, err error) {
 			}
 			//new instance
 			if create {
-				logger.WithFields(map[string]interface{}{
-					"subscribeService": subscribeService.ServiceName,
-					"port":             subscribeService.Port,
-				}).Info("create instance")
-
-				nw.next <- &registry.Result{Action: "create", Service: buildRegistryService(&subscribeService)}
-
+				nw.next <- &registry.Result{Action: "create", Service: nw.buildRegistryService(&subscribeService)}
 				nw.Lock()
 				nw.cacheServices[serviceName] = append(nw.cacheServices[serviceName], subscribeService)
 				nw.Unlock()
@@ -149,8 +143,7 @@ func (nw *watcher) callBackHandle(services []model.Instance, err error) {
 				}
 			}
 			if del {
-				log.Println("del", cacheService.ServiceName, cacheService.Port)
-				nw.next <- &registry.Result{Action: "delete", Service: buildRegistryService(&cacheService)}
+				nw.next <- &registry.Result{Action: "delete", Service: nw.buildRegistryService(&cacheService)}
 
 				nw.Lock()
 				nw.cacheServices[serviceName][index] = model.Instance{}
@@ -163,7 +156,7 @@ func (nw *watcher) callBackHandle(services []model.Instance, err error) {
 
 }
 
-func buildRegistryService(v *model.Instance) (s *registry.Service) {
+func (nw *watcher) buildRegistryService(v *model.Instance) (s *registry.Service) {
 	nodes := make([]*registry.Node, 0)
 	nodes = append(nodes, &registry.Node{
 		Id:       v.InstanceId,
@@ -171,7 +164,7 @@ func buildRegistryService(v *model.Instance) (s *registry.Service) {
 		Metadata: v.Metadata,
 	})
 	s = &registry.Service{
-		Name:     v.ServiceName,
+		Name:     nw.param.ServiceName,
 		Version:  "latest",
 		Metadata: v.Metadata,
 		Nodes:    nodes,
