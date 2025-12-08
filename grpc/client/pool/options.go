@@ -15,6 +15,18 @@ func WithPoolSize(poolSize int) Option {
 	}
 }
 
+func WithPoolStaleEvictionDuration(staleEvictionDuration time.Duration) Option {
+	return func(pool *GrpcPool) {
+		pool.staleEvictionDuration = staleEvictionDuration
+	}
+}
+
+func WithPoolPickRetry(pickRetry int) Option {
+	return func(pool *GrpcPool) {
+		pool.pickRetry = pickRetry
+	}
+}
+
 func WithDialOptions(dialOptions []grpc.DialOption) Option {
 	return func(pool *GrpcPool) {
 		pool.dialOptions = dialOptions
@@ -75,7 +87,11 @@ var DefaultDialTimeout = 3 * time.Second
 //	}),
 //}
 
-var defaultPoolSize = 3
+var (
+	defaultPoolSize              = 3
+	defaultStaleEvictionDuration = 15 * time.Second
+	defaultPickRetry             = 3
+)
 
 var grpcPool sync.Map
 var poolInit sync.Mutex
