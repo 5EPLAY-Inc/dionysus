@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -156,66 +157,106 @@ func (gp *GrpcPool) NewStream(ctx context.Context, desc *grpc.StreamDesc, method
 	return grpcConn.conn.NewStream(ctx, desc, method, opts...)
 }
 
+// connUsable reports whether a connection can serve a call. Ready and Idle are
+// both fine (Idle simply hasn't had traffic yet). Note this is transport-level
+// only -- it cannot tell that a Ready conn points at a wrong/reused endpoint;
+// that concern is handled resolver-side, see grpc/balancer/resolver.
+func connUsable(c *GrpcConn) bool {
+	if c == nil || c.conn == nil {
+		return false
+	}
+	switch c.conn.GetState() {
+	case connectivity.Ready, connectivity.Idle:
+		return true
+	default:
+		return false
+	}
+}
+
+// inflightAt returns the in-flight count of the conn at index i, or MaxInt64 for
+// an empty slot so it is never chosen as the least-loaded connection.
+func (gp *GrpcPool) inflightAt(i int) int64 {
+	if c := gp.conns[i]; c != nil {
+		return atomic.LoadInt64(&c.inflight)
+	}
+	return math.MaxInt64
+}
+
 func (gp *GrpcPool) pickLeastConn() (*GrpcConn, error) {
 	var retryCounter int
 Retry:
 	retryCounter++
 	gp.Lock()
+	// snapshot poolSize so concurrent scale/evict cannot cause an out-of-range
+	// or divide-by-zero while we index below.
+	size := gp.poolSize
 	randIndex1 := gp.rand.Uint32()
 	randIndex2 := gp.rand.Uint32()
 	randIndex3 := gp.rand.Uint32()
 	gp.Unlock()
-	minIndex := randIndex1
-	minInflight := gp.conns[int(minIndex)%gp.poolSize].inflight
 
-	if minInflight > gp.conns[int(randIndex2)%gp.poolSize].inflight {
-		minInflight = gp.conns[int(randIndex2)%gp.poolSize].inflight
-		minIndex = randIndex2
+	if size <= 0 {
+		return nil, errors.New("pickLeastConn, grpc pool has no available connection")
 	}
 
-	if minInflight > gp.conns[int(randIndex3)%gp.poolSize].inflight {
-		minInflight = gp.conns[int(randIndex3)%gp.poolSize].inflight
-		minIndex = randIndex3
+	// power of three choices: pick the least loaded of three random conns
+	minIndex := int(randIndex1) % size
+	if gp.inflightAt(int(randIndex2)%size) < gp.inflightAt(minIndex) {
+		minIndex = int(randIndex2) % size
 	}
-	fallbackIndex := int(minIndex) % gp.poolSize
-	grpcConn := gp.conns[fallbackIndex]
+	if gp.inflightAt(int(randIndex3)%size) < gp.inflightAt(minIndex) {
+		minIndex = int(randIndex3) % size
+	}
 
-	// if conn is not ready, choose a next ready conn
-	if (grpcConn.conn.GetState() != connectivity.Ready || grpcConn.conn.GetState() != connectivity.Idle) && retryCounter <= gp.pickRetry {
-		for i := 0; i < gp.poolSize; i++ {
-			if gp.conns[(int(minIndex)+i)%gp.poolSize].conn.GetState() == connectivity.Ready ||
-				gp.conns[(int(minIndex)+i)%gp.poolSize].conn.GetState() == connectivity.Idle {
-				return gp.conns[(int(minIndex)+i)%gp.poolSize], nil
+	// fast path: the least-loaded conn is usable
+	if connUsable(gp.conns[minIndex]) {
+		return gp.conns[minIndex], nil
+	}
+
+	// the chosen conn is not usable; scan for another usable conn
+	if retryCounter <= gp.pickRetry {
+		for i := 0; i < size; i++ {
+			if candidate := gp.conns[(minIndex+i)%size]; connUsable(candidate) {
+				return candidate, nil
 			}
 		}
 		goto Retry
 	}
 
-	// fallback
-	if grpcConn.conn.GetState() != connectivity.Ready || grpcConn.conn.GetState() != connectivity.Idle {
-		c, err := gp.newConnection()
-		if err != nil {
-			log.Errorf("grpc pool pickLeastConn fallback failed, new connection error %v", err)
-			return nil, fmt.Errorf("pickLeastConn, newFallback connetion error:%w", err)
-		}
-		// avoid connection leak
-		if err := grpcConn.conn.Close(); err != nil {
-			log.Errorf("grpc pool pickLeastConn close the stale fallback connection error %v", err)
-		}
-		newCtx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-		defer cancel()
-		for c.conn.GetState() != connectivity.Ready {
-			if r := c.conn.WaitForStateChange(newCtx, c.conn.GetState()); r {
-				gp.stateUpdate.Lock()
-				// overwrite the stale fallback connection
-				gp.conns[fallbackIndex] = c
-				gp.stateUpdate.Unlock()
-				return c, nil
-			}
-		}
+	// no usable conn after retries: don't resurrect a closed pool
+	if gp.isClosed {
+		return nil, errors.New("pickLeastConn, grpc pool is closed")
 	}
 
-	return nil, errors.New("error, there is not a read connection!")
+	// replace the stale slot with a fresh conn
+	c, err := gp.newConnection()
+	if err != nil {
+		log.Errorf("grpc pool pickLeastConn fallback failed, new connection error %v", err)
+		return nil, fmt.Errorf("pickLeastConn, new fallback connection error: %w", err)
+	}
+
+	gp.stateUpdate.Lock()
+	if minIndex < gp.poolSize {
+		// avoid leaking the connection we are replacing
+		if stale := gp.conns[minIndex]; stale != nil && stale.conn != nil {
+			if err := stale.conn.Close(); err != nil {
+				log.Errorf("grpc pool pickLeastConn close the stale connection error %v", err)
+			}
+		}
+		gp.conns[minIndex] = c
+	}
+	gp.stateUpdate.Unlock()
+
+	// best effort: wait briefly for readiness without busy-spinning on an
+	// already-expired context (the old code could spin forever here).
+	newCtx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+	for c.conn.GetState() != connectivity.Ready {
+		if !c.conn.WaitForStateChange(newCtx, c.conn.GetState()) {
+			break
+		}
+	}
+	return c, nil
 }
 
 func (gp *GrpcPool) autoScalerRun() {
@@ -236,16 +277,57 @@ func (gp *GrpcPool) autoScalerRun() {
 func (gp *GrpcPool) evict() {
 	t := time.NewTicker(gp.staleEvictionDuration)
 	defer t.Stop()
-	for {
-		select {
-		case <-t.C:
-			for index, c := range gp.conns {
-				if c.conn.GetState() == connectivity.Shutdown {
-					gp.drain(index)
-				}
-			}
-			gp.restore()
+	for range t.C {
+		gp.reapShutdownConns()
+	}
+}
+
+// reapShutdownConns closes connections that have entered the Shutdown state and
+// refills the pool back up to its original size.
+//
+// Active connections are kept contiguously in conns[0:poolSize]; the slots in
+// [poolSize:cap] are reserved (nil) for scaling. The previous implementation
+// used len(gp.conns) (== cap == MaxConn) where it meant poolSize, so it ranged
+// over nil reserved slots (nil-pointer panic once any conn was Shutdown), swapped
+// nil tail entries into live slots, and closed the wrong connection via a defer
+// that ran after the swap. This keeps the [0:poolSize] invariant intact.
+func (gp *GrpcPool) reapShutdownConns() {
+	gp.stateUpdate.Lock()
+	defer gp.stateUpdate.Unlock()
+
+	// don't resurrect connections after the pool has been closed
+	if gp.isClosed {
+		return
+	}
+
+	target := gp.poolSize
+	for i := 0; i < gp.poolSize; {
+		c := gp.conns[i]
+		if c != nil && c.conn != nil && c.conn.GetState() != connectivity.Shutdown {
+			i++
+			continue
 		}
+		// drop this shutdown/empty conn: close it, then move the last active
+		// conn into this slot and shrink the active region. Re-check slot i.
+		if c != nil && c.conn != nil {
+			if err := c.conn.Close(); err != nil {
+				log.Errorf("grpc pool evict close connection %v error %v", i, err)
+			}
+		}
+		last := gp.poolSize - 1
+		gp.conns[i] = gp.conns[last]
+		gp.conns[last] = nil
+		gp.poolSize--
+	}
+
+	for gp.poolSize < target {
+		c, err := gp.newConnection()
+		if err != nil {
+			log.Errorf("grpc pool evict restore dial error %v", err)
+			break
+		}
+		gp.conns[gp.poolSize] = c
+		gp.poolSize++
 	}
 }
 
@@ -260,35 +342,6 @@ func (gp *GrpcPool) newConnection() (*GrpcConn, error) {
 		inflight: 0,
 	}
 	return c, nil
-}
-
-func (gp *GrpcPool) restore() {
-	gp.stateUpdate.Lock()
-	defer gp.stateUpdate.Unlock()
-	if len(gp.conns) < gp.poolSize {
-		for i := 0; i < (gp.poolSize - len(gp.conns)); i++ {
-			c, err := gp.newConnection()
-			if err != nil {
-				log.Errorf("grpc pool is restore form %v to %v", gp.poolSize, gp.poolSize)
-				continue
-			}
-			gp.conns[len(gp.conns)-1] = c
-		}
-	}
-}
-
-func (gp *GrpcPool) drain(connectionIndex int) {
-	gp.stateUpdate.Lock()
-	defer gp.stateUpdate.Unlock()
-	defer func() {
-		err := gp.conns[connectionIndex].conn.Close()
-		if err != nil {
-			log.Errorf("grpc drain connection %v error %v", connectionIndex, err)
-			return
-		}
-	}()
-	gp.conns[connectionIndex] = gp.conns[len(gp.conns)-1]
-	gp.conns = gp.conns[:len(gp.conns)-1]
 }
 
 func (gp *GrpcPool) poolScaler(deltaConn int) {
